@@ -6,6 +6,8 @@ out
 dist
 *.tgz
 *.gif
+samples/
+debug-unsliced.png
 
 # code coverage
 coverage

@@ -196,9 +196,10 @@ const fullPrompt = [
   `- Each frame shows the next step in a smooth, looping animation`,
   `- Use a plain white background in all frames`,
   `- All frames must be exactly the same size with clear, straight boundaries between them`,
+  `- Do NOT draw borders, lines, or dividers between frames`,
   `- The animation should loop seamlessly from the last frame back to the first`,
   `- Keep the subject centered and consistently sized across all frames`,
-  `- Do NOT add frame numbers, labels, or any text`,
+  `- ABSOLUTELY NO text of any kind in the image: no frame numbers, no labels, no captions, no watermarks, no annotations`,
 ].join("\n");
 
 if (values.debug) {
@@ -269,15 +270,19 @@ if (values.debug) {
   );
 }
 
+// Inset each frame by 3% to crop out grid borders/lines
+const insetX = Math.max(1, Math.round(frameW * 0.03));
+const insetY = Math.max(1, Math.round(frameH * 0.03));
+
 const frames: Buffer[] = [];
 for (let row = 0; row < rows && frames.length < numFrames; row++) {
   for (let col = 0; col < cols && frames.length < numFrames; col++) {
     const frame = await sharp(imageBuffer)
       .extract({
-        left: col * frameW,
-        top: row * frameH,
-        width: frameW,
-        height: frameH,
+        left: col * frameW + insetX,
+        top: row * frameH + insetY,
+        width: frameW - insetX * 2,
+        height: frameH - insetY * 2,
       })
       .resize(outputW, outputH, { fit: "cover" })
       .toBuffer();
