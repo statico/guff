@@ -249,6 +249,13 @@ const imageBuffer = await generateFn({
   inputImages,
 });
 
+// In debug mode, save the raw unsliced image
+if (values.debug) {
+  const debugPath = resolve("debug-unsliced.png");
+  await sharp(imageBuffer).png().toFile(debugPath);
+  console.log(`--- Saved unsliced image: ${debugPath} ---`);
+}
+
 // Split generated image into frames
 const metadata = await sharp(imageBuffer).metadata();
 const imgW = metadata.width!;
