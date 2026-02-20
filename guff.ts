@@ -49,6 +49,7 @@ Options:
   -f, --frames <n>             Number of animation frames (default: 4)
   -D, --delay <ms>             Delay between frames in ms (default: 250)
   -s, --size <WxH>             Output size (default: 128x128)
+  -a, --aspect <W:H>           Frame aspect ratio (default: 1:1)
   -o, --output <file>          Output filename (default: auto-generated)
   -i, --input <file>           Input image(s) for reference (repeatable)
   -r, --resolution <res>       Resolution: 1k, 2k, 4k (default: 1k)
@@ -82,6 +83,7 @@ const { values, positionals } = parseArgs({
       short: "m",
       default: "gemini/gemini-3-pro-image-preview",
     },
+    aspect: { type: "string", short: "a", default: "1:1" },
     debug: { type: "boolean", short: "d", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
@@ -151,6 +153,17 @@ if (isNaN(temperature) || temperature < 0 || temperature > 2) {
   process.exit(1);
 }
 
+// Parse frame aspect ratio
+const frameARMatch = values.aspect!.match(/^(\d+):(\d+)$/);
+if (!frameARMatch) {
+  console.error(
+    "Error: aspect must be in W:H format (e.g., 1:1, 16:9, 4:3)"
+  );
+  process.exit(1);
+}
+const frameAR =
+  parseInt(frameARMatch[1]!, 10) / parseInt(frameARMatch[2]!, 10);
+
 // Check gifsicle is available
 try {
   execFileSync("gifsicle", ["--version"], { stdio: "pipe" });
@@ -161,16 +174,25 @@ try {
   process.exit(1);
 }
 
-// Compute grid layout for N frames
+// Compute grid layout for N frames — find the most square-like factor pair
 function gridLayout(n: number): { cols: number; rows: number } {
-  if (n <= 3) return { cols: n, rows: 1 };
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  return { cols, rows };
+  let bestCols = n,
+    bestRows = 1;
+  for (let r = 2; r * r <= n; r++) {
+    if (n % r === 0) {
+      bestCols = n / r;
+      bestRows = r;
+    }
+  }
+  return { cols: bestCols, rows: bestRows };
 }
 
-function bestAspectRatio(cols: number, rows: number): string {
-  const target = cols / rows;
+function bestAspectRatio(
+  cols: number,
+  rows: number,
+  frameAR: number
+): string {
+  const target = (cols * frameAR) / rows;
   let best = ASPECT_RATIOS[0]!;
   let bestDist = Infinity;
   for (const r of ASPECT_RATIOS) {
@@ -184,7 +206,31 @@ function bestAspectRatio(cols: number, rows: number): string {
 }
 
 const { cols, rows } = gridLayout(numFrames);
-const aspectRatio = bestAspectRatio(cols, rows);
+
+// Validate that the grid isn't just a single long row (primes > 3)
+if (rows === 1 && cols > 3) {
+  const suggest: number[] = [];
+  for (let n = numFrames - 1; n >= 2; n--) {
+    const { rows: r } = gridLayout(n);
+    if (r > 1 || n <= 3) {
+      suggest.push(n);
+      break;
+    }
+  }
+  for (let n = numFrames + 1; n <= 16; n++) {
+    const { rows: r } = gridLayout(n);
+    if (r > 1 || n <= 3) {
+      suggest.push(n);
+      break;
+    }
+  }
+  console.error(
+    `Error: ${numFrames} frames can't form a clean grid (only ${cols}x1). Try: ${suggest.join(" or ")}`
+  );
+  process.exit(1);
+}
+
+const aspectRatio = bestAspectRatio(cols, rows, frameAR);
 
 // Build prompt for animation frames
 const fullPrompt = [
@@ -198,6 +244,7 @@ const fullPrompt = [
   `- All frames must be exactly the same size with clear, straight boundaries between them`,
   `- Do NOT draw borders, lines, or dividers between frames`,
   `- The animation should loop seamlessly from the last frame back to the first`,
+  `- Each frame should have ${values.aspect} aspect ratio`,
   `- Keep the subject centered and consistently sized across all frames`,
   `- ABSOLUTELY NO text of any kind in the image: no frame numbers, no labels, no captions, no watermarks, no annotations`,
 ].join("\n");
@@ -261,22 +308,35 @@ if (values.debug) {
 const metadata = await sharp(imageBuffer).metadata();
 const imgW = metadata.width!;
 const imgH = metadata.height!;
+
+// Detect actual grid dimensions (Gemini sometimes adds extra rows)
+const expectedFrameW = imgW / cols;
+const expectedFrameH = expectedFrameW / frameAR;
+const detectedRows = Math.round(imgH / expectedFrameH);
+let actualRows = rows;
+if (detectedRows !== rows) {
+  console.log(
+    `Warning: detected ${detectedRows} rows (expected ${rows}), adjusting`
+  );
+  actualRows = detectedRows;
+}
+
 const frameW = Math.floor(imgW / cols);
-const frameH = Math.floor(imgH / rows);
+const frameH = Math.floor(imgH / actualRows);
 
 if (values.debug) {
   console.log(
-    `--- Image: ${imgW}x${imgH}, Frame: ${frameW}x${frameH}, Grid: ${cols}x${rows} ---`
+    `--- Image: ${imgW}x${imgH}, Frame: ${frameW}x${frameH}, Grid: ${cols}x${actualRows} ---`
   );
 }
 
-// Inset each frame by 3% to crop out grid borders/lines
+// Extract raw frames with 3% inset to crop grid borders
 const insetX = Math.max(1, Math.round(frameW * 0.03));
 const insetY = Math.max(1, Math.round(frameH * 0.03));
 
-const frames: Buffer[] = [];
-for (let row = 0; row < rows && frames.length < numFrames; row++) {
-  for (let col = 0; col < cols && frames.length < numFrames; col++) {
+const rawFrames: Buffer[] = [];
+for (let row = 0; row < actualRows && rawFrames.length < numFrames; row++) {
+  for (let col = 0; col < cols && rawFrames.length < numFrames; col++) {
     const frame = await sharp(imageBuffer)
       .extract({
         left: col * frameW + insetX,
@@ -284,10 +344,58 @@ for (let row = 0; row < rows && frames.length < numFrames; row++) {
         width: frameW - insetX * 2,
         height: frameH - insetY * 2,
       })
-      .resize(outputW, outputH, { fit: "cover" })
       .toBuffer();
-    frames.push(frame);
+    rawFrames.push(frame);
   }
+}
+
+// Trim whitespace from each frame and find max dimensions
+const trimmed: { data: Buffer; width: number; height: number }[] = [];
+let maxTrimW = 0,
+  maxTrimH = 0;
+for (const raw of rawFrames) {
+  const { data, info } = await sharp(raw)
+    .trim({ threshold: 20 })
+    .toBuffer({ resolveWithObject: true });
+  trimmed.push({ data, width: info.width, height: info.height });
+  maxTrimW = Math.max(maxTrimW, info.width);
+  maxTrimH = Math.max(maxTrimH, info.height);
+}
+
+if (values.debug) {
+  console.log(
+    `--- Trimmed max: ${maxTrimW}x${maxTrimH} ---`
+  );
+}
+
+// Center each trimmed frame on a uniform canvas, then resize to output
+// (composite and resize must be separate steps — sharp applies resize before composite)
+const frames: Buffer[] = [];
+for (const t of trimmed) {
+  const composited = await sharp({
+    create: {
+      width: maxTrimW,
+      height: maxTrimH,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    },
+  })
+    .composite([
+      {
+        input: t.data,
+        left: Math.round((maxTrimW - t.width) / 2),
+        top: Math.round((maxTrimH - t.height) / 2),
+      },
+    ])
+    .png()
+    .toBuffer();
+  const frame = await sharp(composited)
+    .resize(outputW, outputH, {
+      fit: "contain",
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
+    .toBuffer();
+  frames.push(frame);
 }
 
 // Assemble GIF with gifsicle
