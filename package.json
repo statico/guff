@@ -1,0 +1,20 @@
+{
+  "name": "guff",
+  "version": "0.1.0",
+  "description": "Generate animated GIFs using AI",
+  "license": "Unlicense",
+  "module": "guff.ts",
+  "type": "module",
+  "bin": {
+    "guff": "guff.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
+  }
+}
