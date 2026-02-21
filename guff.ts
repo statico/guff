@@ -7,6 +7,21 @@ import { tmpdir } from "os";
 import { execFileSync } from "child_process";
 import sharp from "sharp";
 
+// Check if a key was loaded from .env in cwd
+function keyFromDotenv(key: string): boolean {
+  try {
+    const envPath = resolve(".env");
+    if (!existsSync(envPath)) return false;
+    const content = require("fs").readFileSync(envPath, "utf-8");
+    return content.split("\n").some((line: string) => {
+      const trimmed = line.trim();
+      return !trimmed.startsWith("#") && trimmed.startsWith(`${key}=`);
+    });
+  } catch {
+    return false;
+  }
+}
+
 const RESOLUTIONS: Record<string, string> = {
   "1k": "1K",
   "2k": "2K",
@@ -472,6 +487,9 @@ async function generateClaude(opts: GenerateOpts): Promise<Buffer[]> {
     console.error("Error: ANTHROPIC_API_KEY environment variable is required");
     process.exit(1);
   }
+  if (keyFromDotenv("ANTHROPIC_API_KEY")) {
+    console.log("Using ANTHROPIC_API_KEY from .env");
+  }
 
   const systemPrompt = `You are an animation frame generator. You write TypeScript code that produces SVG strings for animation frames.
 
@@ -535,7 +553,7 @@ console.log(JSON.stringify(frames));`;
 
   const body = {
     model: opts.model,
-    max_tokens: 4096,
+    max_tokens: 16384,
     temperature: opts.temperature,
     system: systemPrompt,
     messages: [{ role: "user", content: userContent }],
@@ -609,6 +627,9 @@ async function generateGemini(opts: GenerateOpts): Promise<Buffer[]> {
   if (!apiKey) {
     console.error("Error: GEMINI_API_KEY environment variable is required");
     process.exit(1);
+  }
+  if (keyFromDotenv("GEMINI_API_KEY")) {
+    console.log("Using GEMINI_API_KEY from .env");
   }
 
   // Build grid prompt
