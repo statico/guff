@@ -13,8 +13,9 @@ const RESOLUTIONS: Record<string, string> = {
   "4k": "4K",
 };
 
-const PROVIDERS: Record<string, (opts: GenerateOpts) => Promise<Buffer>> = {
+const PROVIDERS: Record<string, (opts: GenerateOpts) => Promise<Buffer[]>> = {
   gemini: generateGemini,
+  claude: generateClaude,
 };
 
 const ASPECT_RATIOS = [
@@ -38,6 +39,12 @@ interface GenerateOpts {
   temperature: number;
   debug: boolean;
   inputImages: InputImage[];
+  numFrames: number;
+  outputW: number;
+  outputH: number;
+  cols: number;
+  rows: number;
+  frameAR: number;
 }
 
 function usage(): never {
@@ -46,33 +53,34 @@ function usage(): never {
 Generate animated GIFs using AI.
 
 Options:
-  -f, --frames <n>             Number of animation frames (default: 4)
-  -D, --delay <ms>             Delay between frames in ms (default: 250)
+  -f, --frames <n>             Number of animation frames (default: 32)
+  -D, --delay <ms>             Delay between frames in ms (default: 100)
   -s, --size <WxH>             Output size (default: 128x128)
   -a, --aspect <W:H>           Frame aspect ratio (default: 1:1)
   -o, --output <file>          Output filename (default: auto-generated)
   -i, --input <file>           Input image(s) for reference (repeatable)
-  -r, --resolution <res>       Resolution: 1k, 2k, 4k (default: 1k)
+  -r, --resolution <res>       Resolution: 1k, 2k, 4k (default: 1k, Gemini only)
   -t, --temperature <temp>     Temperature 0.0-2.0 (default: 1.0)
-  -m, --model <provider/model> Model (default: gemini/gemini-3-pro-image-preview)
+  -m, --model <provider/model> Model (default: claude/claude-sonnet-4-6)
+  -c, --colors <n>             Max colors in GIF palette (default: 256)
   -d, --debug                  Log full prompt and API details
   -h, --help                   Show this help
 
 Requires: gifsicle (brew install gifsicle)
 
 Examples:
-  guff 'a dancing penguin'
-  guff --frames 4 --delay 250 --size 128x128 --output penguin.gif 'a dancing penguin'
-  guff -f 8 -s 256x256 'a spinning coin'
-  guff -i ref.png 'animate this character waving'`);
+  guff 'a bouncing ball'
+  guff -f 8 -s 256x256 'a spinning star'
+  guff -d 'a dancing penguin'
+  guff -m gemini/gemini-2-flash-preview-image-generation 'a waving hand'`);
   process.exit(0);
 }
 
 const { values, positionals } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
-    frames: { type: "string", short: "f", default: "4" },
-    delay: { type: "string", short: "D", default: "250" },
+    frames: { type: "string", short: "f", default: "32" },
+    delay: { type: "string", short: "D", default: "100" },
     size: { type: "string", short: "s", default: "128x128" },
     output: { type: "string", short: "o" },
     input: { type: "string", short: "i", multiple: true },
@@ -81,8 +89,9 @@ const { values, positionals } = parseArgs({
     model: {
       type: "string",
       short: "m",
-      default: "gemini/gemini-3-pro-image-preview",
+      default: "claude/claude-sonnet-4-6",
     },
+    colors: { type: "string", short: "c", default: "256" },
     aspect: { type: "string", short: "a", default: "1:1" },
     debug: { type: "boolean", short: "d", default: false },
     help: { type: "boolean", short: "h", default: false },
@@ -101,8 +110,8 @@ if (!prompt) {
 
 // Validate frames
 const numFrames = parseInt(values.frames!, 10);
-if (isNaN(numFrames) || numFrames < 2 || numFrames > 16) {
-  console.error("Error: frames must be between 2 and 16");
+if (isNaN(numFrames) || numFrames < 2 || numFrames > 64) {
+  console.error("Error: frames must be between 2 and 64");
   process.exit(1);
 }
 
@@ -150,6 +159,13 @@ if (!imageSize) {
 const temperature = parseFloat(values.temperature!);
 if (isNaN(temperature) || temperature < 0 || temperature > 2) {
   console.error("Error: temperature must be between 0.0 and 2.0");
+  process.exit(1);
+}
+
+// Parse colors
+const colors = parseInt(values.colors!, 10);
+if (isNaN(colors) || colors < 2 || colors > 256) {
+  console.error("Error: colors must be between 2 and 256");
   process.exit(1);
 }
 
@@ -207,8 +223,8 @@ function bestAspectRatio(
 
 const { cols, rows } = gridLayout(numFrames);
 
-// Validate that the grid isn't just a single long row (primes > 3)
-if (rows === 1 && cols > 3) {
+// Grid validation only applies to Gemini (which generates sprite sheets)
+if (provider === "gemini" && rows === 1 && cols > 3) {
   const suggest: number[] = [];
   for (let n = numFrames - 1; n >= 2; n--) {
     const { rows: r } = gridLayout(n);
@@ -231,29 +247,6 @@ if (rows === 1 && cols > 3) {
 }
 
 const aspectRatio = bestAspectRatio(cols, rows, frameAR);
-
-// Build prompt for animation frames
-const fullPrompt = [
-  `Generate a ${cols}x${rows} grid of ${numFrames} animation frames showing: ${prompt}`,
-  ``,
-  `CRITICAL INSTRUCTIONS:`,
-  `- Create exactly ${numFrames} frames arranged in a ${cols}-column, ${rows}-row grid`,
-  `- Frame order: left-to-right, top-to-bottom (frame 1 is top-left)`,
-  `- Each frame shows the next step in a smooth, looping animation`,
-  `- Use a plain white background in all frames`,
-  `- All frames must be exactly the same size with clear, straight boundaries between them`,
-  `- Do NOT draw borders, lines, or dividers between frames`,
-  `- The animation should loop seamlessly from the last frame back to the first`,
-  `- Each frame should have ${values.aspect} aspect ratio`,
-  `- Keep the subject centered and consistently sized across all frames`,
-  `- ABSOLUTELY NO text of any kind in the image: no frame numbers, no labels, no captions, no watermarks, no annotations`,
-].join("\n");
-
-if (values.debug) {
-  console.log("--- Prompt ---");
-  console.log(fullPrompt);
-  console.log(`--- Grid: ${cols}x${rows}, Aspect ratio: ${aspectRatio} ---`);
-}
 
 // Load input images
 const MIME_TYPES: Record<string, string> = {
@@ -285,118 +278,23 @@ for (const file of values.input ?? []) {
   inputImages.push({ mimeType, data });
 }
 
-// Generate image
+// Generate frames
 console.log(`Generating ${numFrames}-frame animation...`);
-const imageBuffer = await generateFn({
+const frames = await generateFn({
   model: modelName,
-  prompt: fullPrompt,
+  prompt,
   aspectRatio,
   imageSize,
   temperature,
   debug: values.debug!,
   inputImages,
+  numFrames,
+  outputW,
+  outputH,
+  cols,
+  rows,
+  frameAR,
 });
-
-// In debug mode, save the raw unsliced image
-if (values.debug) {
-  const debugPath = resolve("debug-unsliced.png");
-  await sharp(imageBuffer).png().toFile(debugPath);
-  console.log(`--- Saved unsliced image: ${debugPath} ---`);
-}
-
-// Split generated image into frames
-const metadata = await sharp(imageBuffer).metadata();
-const imgW = metadata.width!;
-const imgH = metadata.height!;
-
-// Detect actual grid dimensions (Gemini sometimes adds extra rows)
-const expectedFrameW = imgW / cols;
-const expectedFrameH = expectedFrameW / frameAR;
-const detectedRows = Math.round(imgH / expectedFrameH);
-let actualRows = rows;
-if (detectedRows !== rows) {
-  console.log(
-    `Warning: detected ${detectedRows} rows (expected ${rows}), adjusting`
-  );
-  actualRows = detectedRows;
-}
-
-const frameW = Math.floor(imgW / cols);
-const frameH = Math.floor(imgH / actualRows);
-
-if (values.debug) {
-  console.log(
-    `--- Image: ${imgW}x${imgH}, Frame: ${frameW}x${frameH}, Grid: ${cols}x${actualRows} ---`
-  );
-}
-
-// Extract raw frames with 3% inset to crop grid borders
-const insetX = Math.max(1, Math.round(frameW * 0.03));
-const insetY = Math.max(1, Math.round(frameH * 0.03));
-
-const rawFrames: Buffer[] = [];
-for (let row = 0; row < actualRows && rawFrames.length < numFrames; row++) {
-  for (let col = 0; col < cols && rawFrames.length < numFrames; col++) {
-    const frame = await sharp(imageBuffer)
-      .extract({
-        left: col * frameW + insetX,
-        top: row * frameH + insetY,
-        width: frameW - insetX * 2,
-        height: frameH - insetY * 2,
-      })
-      .toBuffer();
-    rawFrames.push(frame);
-  }
-}
-
-// Trim whitespace from each frame and find max dimensions
-const trimmed: { data: Buffer; width: number; height: number }[] = [];
-let maxTrimW = 0,
-  maxTrimH = 0;
-for (const raw of rawFrames) {
-  const { data, info } = await sharp(raw)
-    .trim({ threshold: 20 })
-    .toBuffer({ resolveWithObject: true });
-  trimmed.push({ data, width: info.width, height: info.height });
-  maxTrimW = Math.max(maxTrimW, info.width);
-  maxTrimH = Math.max(maxTrimH, info.height);
-}
-
-if (values.debug) {
-  console.log(
-    `--- Trimmed max: ${maxTrimW}x${maxTrimH} ---`
-  );
-}
-
-// Center each trimmed frame on a uniform canvas, then resize to output
-// (composite and resize must be separate steps — sharp applies resize before composite)
-const frames: Buffer[] = [];
-for (const t of trimmed) {
-  const composited = await sharp({
-    create: {
-      width: maxTrimW,
-      height: maxTrimH,
-      channels: 4,
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    },
-  })
-    .composite([
-      {
-        input: t.data,
-        left: Math.round((maxTrimW - t.width) / 2),
-        top: Math.round((maxTrimH - t.height) / 2),
-      },
-    ])
-    .png()
-    .toBuffer();
-  const frame = await sharp(composited)
-    .resize(outputW, outputH, {
-      fit: "contain",
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    })
-    .toBuffer();
-  frames.push(frame);
-}
 
 // Assemble GIF with gifsicle
 const tmpDir = join(tmpdir(), `guff-${Date.now()}`);
@@ -422,6 +320,8 @@ try {
     "--delay",
     String(delayCs),
     "--loop",
+    "--colors",
+    String(colors),
     "-O3",
     ...frameFiles,
     "-o",
@@ -489,13 +389,251 @@ async function displayInTerminal(path: string) {
   }
 }
 
+// --- Helpers for Claude provider ---
+
+function extractCode(text: string): string | null {
+  const fenced = text.match(/```(?:typescript|ts|)\n([\s\S]*?)```/);
+  if (fenced) return fenced[1]!;
+  if (text.includes("console.log") && text.includes("JSON.stringify"))
+    return text;
+  return null;
+}
+
+async function executeFrameScript(
+  code: string,
+  opts: GenerateOpts
+): Promise<string[]> {
+  const tmpFile = join(tmpdir(), `guff-gen-${Date.now()}.ts`);
+  try {
+    await Bun.write(tmpFile, code);
+
+    if (opts.debug) {
+      console.log(`--- Generated code written to ${tmpFile} ---`);
+      console.log(code);
+      console.log("--- Executing... ---");
+    }
+
+    const proc = Bun.spawnSync(["bun", "run", tmpFile], {
+      timeout: 30_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    if (proc.exitCode !== 0) {
+      const stderr = proc.stderr.toString();
+      console.error(`Error: generated code failed (exit ${proc.exitCode}):`);
+      console.error(stderr);
+      process.exit(1);
+    }
+
+    const stdout = proc.stdout.toString().trim();
+    let svgs: string[];
+    try {
+      svgs = JSON.parse(stdout);
+    } catch {
+      console.error("Error: generated code did not output valid JSON");
+      if (opts.debug) console.error("stdout:", stdout.slice(0, 500));
+      process.exit(1);
+    }
+
+    if (!Array.isArray(svgs) || svgs.length === 0) {
+      console.error(`Error: expected array of SVG strings, got ${typeof svgs}`);
+      process.exit(1);
+    }
+
+    if (svgs.length !== opts.numFrames) {
+      console.log(
+        `Warning: got ${svgs.length} frames (expected ${opts.numFrames})`
+      );
+    }
+
+    for (let i = 0; i < svgs.length; i++) {
+      if (typeof svgs[i] !== "string" || !svgs[i]!.trim().startsWith("<svg")) {
+        console.error(`Error: frame ${i} is not a valid SVG string`);
+        process.exit(1);
+      }
+    }
+
+    return svgs;
+  } finally {
+    if (!opts.debug) {
+      try {
+        rmSync(tmpFile);
+      } catch {}
+    }
+  }
+}
+
 // --- Provider implementations ---
 
-async function generateGemini(opts: GenerateOpts): Promise<Buffer> {
+async function generateClaude(opts: GenerateOpts): Promise<Buffer[]> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error("Error: ANTHROPIC_API_KEY environment variable is required");
+    process.exit(1);
+  }
+
+  const systemPrompt = `You are an animation frame generator. You write TypeScript code that produces SVG strings for animation frames.
+
+OUTPUT FORMAT:
+Write a self-contained TypeScript script that:
+1. Creates exactly ${opts.numFrames} SVG strings, each ${opts.outputW}x${opts.outputH} pixels
+2. Outputs a JSON array of SVG strings to stdout via console.log(JSON.stringify(svgs))
+3. Uses ONLY built-in JavaScript/TypeScript — no imports, no require, no dependencies
+4. Each SVG must be a complete, valid SVG document starting with <svg> and ending with </svg>
+
+SVG GUIDELINES:
+- Use viewBox="0 0 ${opts.outputW} ${opts.outputH}" on each SVG
+- Use basic SVG elements: <rect>, <circle>, <ellipse>, <polygon>, <path>, <line>, <text>, <g>
+- Use transform attributes for rotation, scaling, translation
+- Use math (Math.sin, Math.cos, Math.PI) for smooth animation curves
+- Use vibrant, complementary colors — avoid plain black-on-white
+- Make subjects large, filling most of the frame
+- Keep the subject centered and consistently sized across frames
+
+ANIMATION PRINCIPLES:
+- The animation should loop seamlessly (last frame flows back to first)
+- Use easing: ease-in-out via sine curves, not linear interpolation
+- For N frames, compute progress as t = i / N (not N-1, since it loops)
+- Common patterns:
+  - Oscillation: Math.sin(t * 2 * Math.PI)
+  - Rotation: angle = t * 360
+  - Bounce: Math.abs(Math.sin(t * Math.PI))
+  - Pulse: 1 + 0.2 * Math.sin(t * 2 * Math.PI)
+
+QUALITY:
+- Add visual depth: gradients, shadows, layered shapes
+- Use stroke-width >= 2 for outlines
+- Add details: highlights, secondary motion, particle effects
+- Make it visually polished, not basic placeholder graphics
+
+CODE STRUCTURE TEMPLATE:
+const frames: string[] = [];
+const W = ${opts.outputW};
+const H = ${opts.outputH};
+const N = ${opts.numFrames};
+
+for (let i = 0; i < N; i++) {
+  const t = i / N; // 0 to 1, looping
+  // ... build SVG string with template literals ...
+  frames.push(svg);
+}
+
+console.log(JSON.stringify(frames));`;
+
+  const userContent: any[] = [];
+  for (const img of opts.inputImages) {
+    userContent.push({
+      type: "image",
+      source: { type: "base64", media_type: img.mimeType, data: img.data },
+    });
+  }
+  userContent.push({
+    type: "text",
+    text: `Create a ${opts.numFrames}-frame looping animation of: ${opts.prompt}`,
+  });
+
+  const body = {
+    model: opts.model,
+    max_tokens: 4096,
+    temperature: opts.temperature,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userContent }],
+  };
+
+  if (opts.debug) {
+    console.log("--- Claude API Request ---");
+    console.log(JSON.stringify({ ...body, system: "(see above)" }, null, 2));
+    console.log("--- System Prompt ---");
+    console.log(systemPrompt);
+    console.log("-------------------");
+  }
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`Error: Claude API returned ${res.status}: ${err}`);
+    process.exit(1);
+  }
+
+  const data: any = await res.json();
+
+  // Log token usage
+  const usage = data.usage;
+  if (usage) {
+    console.log(
+      `Tokens: ${usage.input_tokens} in / ${usage.output_tokens} out`
+    );
+  }
+
+  const textBlock = data.content?.find((b: any) => b.type === "text");
+  if (!textBlock?.text) {
+    console.error("Error: no text in Claude API response");
+    if (opts.debug) console.error(JSON.stringify(data, null, 2));
+    process.exit(1);
+  }
+
+  const code = extractCode(textBlock.text);
+  if (!code) {
+    console.error("Error: could not extract code from Claude's response");
+    if (opts.debug) console.error(textBlock.text.slice(0, 1000));
+    process.exit(1);
+  }
+
+  const svgs = await executeFrameScript(code, opts);
+
+  // Convert SVGs to PNGs
+  const frames: Buffer[] = [];
+  for (const svg of svgs) {
+    const png = await sharp(Buffer.from(svg))
+      .resize(opts.outputW, opts.outputH, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .png()
+      .toBuffer();
+    frames.push(png);
+  }
+
+  return frames;
+}
+
+async function generateGemini(opts: GenerateOpts): Promise<Buffer[]> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.error("Error: GEMINI_API_KEY environment variable is required");
     process.exit(1);
+  }
+
+  // Build grid prompt
+  const fullPrompt = [
+    `Generate a ${opts.cols}x${opts.rows} grid of ${opts.numFrames} animation frames showing: ${opts.prompt}`,
+    ``,
+    `CRITICAL INSTRUCTIONS:`,
+    `- Create exactly ${opts.numFrames} frames arranged in a ${opts.cols}-column, ${opts.rows}-row grid`,
+    `- Frame order: left-to-right, top-to-bottom (frame 1 is top-left)`,
+    `- Each frame shows the next step in a smooth, looping animation`,
+    `- Use a plain white background in all frames`,
+    `- All frames must be exactly the same size with clear, straight boundaries between them`,
+    `- Do NOT draw borders, lines, or dividers between frames`,
+    `- The animation should loop seamlessly from the last frame back to the first`,
+    `- The subject should fill most of each frame with minimal padding — avoid large empty margins`,
+    `- Keep the subject centered and consistently sized across all frames`,
+    `- ABSOLUTELY NO text of any kind in the image: no frame numbers, no labels, no captions, no watermarks, no annotations`,
+  ].join("\n");
+
+  if (opts.debug) {
+    console.log("--- Prompt ---");
+    console.log(fullPrompt);
+    console.log(
+      `--- Grid: ${opts.cols}x${opts.rows}, Aspect ratio: ${opts.aspectRatio} ---`
+    );
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${opts.model}:generateContent?key=${apiKey}`;
@@ -503,7 +641,7 @@ async function generateGemini(opts: GenerateOpts): Promise<Buffer> {
   const parts: any[] = opts.inputImages.map((img) => ({
     inlineData: { mimeType: img.mimeType, data: img.data },
   }));
-  parts.push({ text: opts.prompt });
+  parts.push({ text: fullPrompt });
 
   const body = {
     contents: [{ parts }],
@@ -537,6 +675,15 @@ async function generateGemini(opts: GenerateOpts): Promise<Buffer> {
   }
 
   const data: any = await res.json();
+
+  // Log token usage
+  const usage = data.usageMetadata;
+  if (usage) {
+    console.log(
+      `Tokens: ${usage.promptTokenCount} in / ${usage.candidatesTokenCount} out`
+    );
+  }
+
   const candidate = data.candidates?.[0];
   const imagePart = candidate?.content?.parts?.find(
     (p: any) => p.inlineData
@@ -548,5 +695,67 @@ async function generateGemini(opts: GenerateOpts): Promise<Buffer> {
     process.exit(1);
   }
 
-  return Buffer.from(imagePart.inlineData.data, "base64");
+  const imageBuffer = Buffer.from(imagePart.inlineData.data, "base64");
+
+  // In debug mode, save the raw unsliced image
+  if (opts.debug) {
+    const debugPath = resolve("debug-unsliced.png");
+    await sharp(imageBuffer).png().toFile(debugPath);
+    console.log(`--- Saved unsliced image: ${debugPath} ---`);
+  }
+
+  // Split generated image into frames
+  const metadata = await sharp(imageBuffer).metadata();
+  const imgW = metadata.width!;
+  const imgH = metadata.height!;
+
+  const expectedFrameW = imgW / opts.cols;
+  const expectedFrameH = expectedFrameW / opts.frameAR;
+  const detectedRows = Math.round(imgH / expectedFrameH);
+  let actualRows = opts.rows;
+  if (detectedRows !== opts.rows) {
+    console.log(
+      `Warning: detected ${detectedRows} rows (expected ${opts.rows}), adjusting`
+    );
+    actualRows = detectedRows;
+  }
+
+  const frameW = Math.floor(imgW / opts.cols);
+  const frameH = Math.floor(imgH / actualRows);
+
+  if (opts.debug) {
+    console.log(
+      `--- Image: ${imgW}x${imgH}, Frame: ${frameW}x${frameH}, Grid: ${opts.cols}x${actualRows} ---`
+    );
+  }
+
+  // Extract raw frames with 3% inset to crop grid borders
+  const insetX = Math.max(1, Math.round(frameW * 0.03));
+  const insetY = Math.max(1, Math.round(frameH * 0.03));
+
+  const frames: Buffer[] = [];
+  for (
+    let row = 0;
+    row < actualRows && frames.length < opts.numFrames;
+    row++
+  ) {
+    for (
+      let col = 0;
+      col < opts.cols && frames.length < opts.numFrames;
+      col++
+    ) {
+      const frame = await sharp(imageBuffer)
+        .extract({
+          left: col * frameW + insetX,
+          top: row * frameH + insetY,
+          width: frameW - insetX * 2,
+          height: frameH - insetY * 2,
+        })
+        .resize(opts.outputW, opts.outputH, { fit: "cover" })
+        .toBuffer();
+      frames.push(frame);
+    }
+  }
+
+  return frames;
 }
