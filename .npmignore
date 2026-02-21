@@ -1,2 +1,9 @@
 .env
 .env.*
+*.gif
+*.png
+*.tgz
+samples/
+debug-unsliced.png
+.claude/
+bun.lock
