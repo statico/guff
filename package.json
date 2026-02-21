@@ -1,6 +1,6 @@
 {
   "name": "guff-gif",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Generate animated GIFs using AI",
   "license": "Unlicense",
   "module": "guff.ts",
