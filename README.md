@@ -22,17 +22,17 @@ export ANTHROPIC_API_KEY=your-key-here
 ```
 
 ```sh
-bunx guff@latest [options] <prompt>
+bunx guff-gif@latest [options] <prompt>
 ```
 
 ### Examples
 
 ```sh
-bunx guff@latest 'a bouncing ball'
-bunx guff@latest -f 16 -s 256x256 'a spinning star'
-bunx guff@latest -D 50 'a pulsing heart'
-bunx guff@latest -d 'a dancing penguin'  # debug: see generated code
-bunx guff@latest -m gemini/gemini-2-flash-preview-image-generation 'a waving hand'
+bunx guff-gif@latest 'a bouncing ball'
+bunx guff-gif@latest -f 16 -s 256x256 'a spinning star'
+bunx guff-gif@latest -D 50 'a pulsing heart'
+bunx guff-gif@latest -d 'a dancing penguin'  # debug: see generated code
+bunx guff-gif@latest -m gemini/gemini-2-flash-preview-image-generation 'a waving hand'
 ```
 
 ### Options
